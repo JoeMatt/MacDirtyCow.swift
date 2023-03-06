@@ -313,8 +313,7 @@ static bool overwrite_file(int fd, NSData* sourceData) {
   return true;
 }
 
-static void grant_full_disk_access_impl(void (^completion)(NSString* extension_token,
-                                                           NSError* _Nullable error)) {
+static void grant_full_disk_access_impl(void (^completion)(BOOL success, NSString* extension_token, NSError* _Nullable error)) NS_SWIFT_ASYNC_THROWS_ON_FALSE(1) {
   char* targetPath = "/System/Library/PrivateFrameworks/TCC.framework/Support/tccd";
   int fd = open(targetPath, O_RDONLY | O_CLOEXEC);
   if (fd == -1) {
@@ -329,7 +328,7 @@ static void grant_full_disk_access_impl(void (^completion)(NSString* extension_t
   NSData* originalData = [NSData dataWithBytes:targetMap length:targetLength];
   NSData* sourceData = patchTCCD(targetMap, targetLength);
   if (!sourceData) {
-    completion(nil, [NSError errorWithDomain:@"com.worthdoingbadly.fulldiskaccess"
+    completion(false, nil, [NSError errorWithDomain:@"com.worthdoingbadly.fulldiskaccess"
                                         code:5
                                     userInfo:@{NSLocalizedDescriptionKey : @"Can't patchfind."}]);
     return;
@@ -338,14 +337,14 @@ static void grant_full_disk_access_impl(void (^completion)(NSString* extension_t
   if (!overwrite_file(fd, sourceData)) {
     overwrite_file(fd, originalData);
     munmap(targetMap, targetLength);
-    completion(
+    completion(false,
         nil, [NSError errorWithDomain:@"com.worthdoingbadly.fulldiskaccess"
                                  code:1
                              userInfo:@{
                                NSLocalizedDescriptionKey : @"Can't overwrite file: your device may "
                                                            @"not be vulnerable to CVE-2022-46689."
                              }]);
-    return;
+	  return;
   }
   munmap(targetMap, targetLength);
 
@@ -372,15 +371,15 @@ static void grant_full_disk_access_impl(void (^completion)(NSString* extension_t
                  }];
       extension_token = nil;
     }
-    completion(extension_token, returnError);
+    completion(returnError != nil, extension_token, returnError);
   });
 }
 
-void grant_full_disk_access(void (^completion)(NSError* _Nullable)) {
+void grant_full_disk_access(void (^completion)(BOOL success, NSError* _Nullable)) NS_SWIFT_ASYNC_THROWS_ON_FALSE(1) NS_SWIFT_ASYNC(1){
   if (!NSClassFromString(@"NSPresentationIntent")) {
     // class introduced in iOS 15.0.
     // TODO(zhuowei): maybe check the actual OS version instead?
-    completion([NSError
+    completion(false, [NSError
         errorWithDomain:@"com.worthdoingbadly.fulldiskaccess"
                    code:6
                userInfo:@{
@@ -402,29 +401,31 @@ void grant_full_disk_access(void (^completion)(NSError* _Nullable)) {
     int64_t handle = sandbox_extension_consume(cachedToken.UTF8String);
     if (handle > 0) {
       // cached version worked
-      completion(nil);
-      return;
+      completion(true, nil);
+		return;
     }
   }
-  grant_full_disk_access_impl(^(NSString* extension_token, NSError* _Nullable error) {
-    if (error) {
-      completion(error);
-      return;
-    }
-    int64_t handle = sandbox_extension_consume(extension_token.UTF8String);
-    if (handle <= 0) {
-      completion([NSError
-          errorWithDomain:@"com.worthdoingbadly.fulldiskaccess"
-                     code:4
-                 userInfo:@{NSLocalizedDescriptionKey : @"Failed to consume generated extension"}]);
-      return;
-    }
-    [extension_token writeToURL:sourceURL
-                     atomically:true
-                       encoding:NSUTF8StringEncoding
-                          error:&error];
-    completion(nil);
-  });
+
+	grant_full_disk_access_impl(^(BOOL success, NSString *extension_token, NSError * _Nullable error) {
+		if (!success || error) {
+			completion(false, error);
+			return;
+		}
+		int64_t handle = sandbox_extension_consume(extension_token.UTF8String);
+		if (handle <= 0) {
+			completion(false, [NSError
+							   errorWithDomain:@"com.worthdoingbadly.fulldiskaccess"
+							   code:4
+							   userInfo:@{NSLocalizedDescriptionKey : @"Failed to consume generated extension"}]);
+			return;
+		}
+		[extension_token writeToURL:sourceURL
+						 atomically:true
+						   encoding:NSUTF8StringEncoding
+							  error:&error];
+		completion(true, nil);
+		return;
+	});
 }
 
 /// MARK - installd patch
